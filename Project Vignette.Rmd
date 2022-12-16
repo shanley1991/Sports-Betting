@@ -1,0 +1,457 @@
+---
+title: "Predicted vs. Vegas"
+author: "Shane Hanley"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Vignette Title}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+Introduction
+
+The main goal of my project is to simulate NFL regular season games and use that to generate predictions.  
+These probabilities can be converted to predicted moneyline and spreads for the games.  
+Just for clarification, the moneyline refers to picking who will win the game with 
+the associated odds.  The spread is predicting by much a team needs to at least win
+or lose by in a certain game.  The use of these predicted moneylines and spreads
+can be compared to the current vegas odds to determine if there is an edge.  
+Moreover, if your predicted spread or moneyline is different than vegas that may
+indicate that game being worth a wager.  Of course this is only one piece of
+determining which games to wager on but can be useful.  
+
+
+
+This first part of the code is loading all the necessary packages.
+```{r}
+#install.packages("tidyverse", type = "binary")
+#install.packages("ggrepel", type = "binary")
+#install.packages("nflreadr", type = "binary")
+#install.packages("nflplotR", type = "binary")
+#install.packages("nflseedR")
+#install.packages("shiny")
+#install.packages("ggplot2")
+library(tidyverse)
+library(ggrepel)
+library(nflreadr)
+library(nflplotR)
+library(xgboost)
+library(nflseedR)
+library(shiny)
+library(ggplot2)
+```
+
+
+
+This portion of the code loads the dataset that contains the vegas moneylines and spreads 
+```{r}
+odds <- nflreadr::load_schedules()
+head(odds)
+```
+
+
+We are now filtering on the current season 2022 and renaming the result variable
+to difference.
+
+```{r}
+#this filter only includes the 2022 season for spreads and moneylines
+#2022 season
+season <- odds %>%
+  filter(season == '2022') %>%
+  rename(difference = "result")
+head(season)
+```
+
+
+We are using NFLseedR to simulate the outcomes of the 2022 regular season games.
+We are simulating each game 10 different times.
+```{r}
+
+
+sim <- nflseedR::simulate_nfl(
+  nfl_season = 2022,
+  fresh_season = TRUE,
+  simulations = 10,
+  sims_per_round = 1
+)
+```
+
+
+
+We need to convert the sim list into a dataframe for later use.
+We are also renaming some variables.
+```{r}
+#convert list into a dataframe and rename some variables
+
+my_df <- as.data.frame(sim$game_summary)
+my_df <- my_df %>% rename(predicted_spread_home= "result", away_probability = "away_percentage", home_probability="home_percentage")
+
+head(my_df)
+```
+
+
+These if else statements are converting the probabilities from the simulation
+dataset into moneyline odds for both the away and home teams.  
+```{r}
+#code to calculate the ML for home and away teams based on simulation probabilities
+
+my_df$away_predicted_ML = ifelse(my_df$away_probability > 0.5, 
+                                    -(my_df$away_probability/(1 -my_df$away_probability))*100,
+                                    ((1-my_df$away_probability)/my_df$away_probability)*100)
+
+
+my_df$home_predicted_ML = ifelse(my_df$home_probability > 0.5, 
+                                    -(my_df$home_probability/(1 -my_df$home_probability))*100,
+                                    ((1-my_df$home_probability)/my_df$home_probability)*100)
+head(my_df)
+```
+
+
+This portion of the code is merging the simulation and vegas spreads and moneylines dataframes.
+```{r}
+#join ML and spread dataframe with simulation dataframe
+join_season_my_df <- merge(season,my_df,by=c("week","game_type","away_team","home_team"))
+join_season_my_df
+```
+
+
+
+To simplify the joined dataframes, we are only including certain variables
+for the demonstration.  We are also filtering on only regular season games.
+```{r}
+#selecting specific variables and filtering dataframe on regular season games
+
+join_season_my_df <- join_season_my_df %>% select(week,away_team,home_team,game_type, game_id, away_score,home_score,away_moneyline,home_moneyline,spread_line,
+predicted_spread_home,away_predicted_ML,home_predicted_ML) %>% filter(game_type =="REG")
+
+head(join_season_my_df)
+```
+
+
+
+To make it easier for creating the shiny app, we are converting dataframe into a long
+format using pivot_longer.  We are separating the joined dataframe into three dataframes.
+The three dataframes include one for away moneyline, home moneyline, and spread
+respectively.  This code below is for the away moneyline.  
+```{r}
+ #making an away ML specific dataframe and converting to long format 
+
+away_moneyline <- join_season_my_df %>% select(week,away_team,home_team,game_type, game_id, away_score,home_score,away_moneyline,away_predicted_ML)
+ 
+   away_ML <- away_moneyline %>%
+  pivot_longer(cols = c("away_moneyline","away_predicted_ML"), names_to = "Source", values_to = "Moneyline_Spread")
+  
+   head(away_ML)
+```
+
+
+
+This is the same code as above but this time for the home moneyline.  
+```{r}
+ #making a home team ML specific dataframe and converting to long format 
+
+home_moneyline <- join_season_my_df %>% select(week,away_team,home_team,game_type, game_id, away_score,home_score,home_moneyline,home_predicted_ML)  
+  home_moneyline
+  
+   home_ML <- home_moneyline %>%
+  pivot_longer(cols = c("home_moneyline","home_predicted_ML"), names_to = "Source", values_to = "Moneyline_Spread")
+  
+   head(home_ML)
+```
+
+
+This piece of code is for converting the spread to long format.  
+```{r}
+#making a spread specific dataframe and converting to long format   
+
+spread <- join_season_my_df %>% select(week,away_team,home_team,game_type, game_id, away_score,home_score,,spread_line,predicted_spread_home) 
+    
+    spread_df <-  spread %>%
+  pivot_longer(cols = c("spread_line","predicted_spread_home"), names_to = "Source", values_to = "Moneyline_Spread") 
+    
+    head(spread_df)
+```
+
+
+The next three blocks of code are renaming the moneyline and spread variables to
+vegas and predicted.  
+```{r}
+#rename the Source variable choices 
+
+away_ML <- away_ML %>%
+    mutate(Source = recode(Source,away_moneyline = 'Vegas', away_predicted_ML = 'Predicted'))
+    
+    head(away_ML)
+```
+
+
+```{r}
+ #rename the Source variable choices  
+
+home_ML <- home_ML %>%
+    mutate(Source = recode(Source,home_moneyline = 'Vegas', home_predicted_ML = 'Predicted'))
+    
+    head(home_ML)
+```
+
+
+```{r}
+ #rename the Source variable choices   
+
+spread_df <- spread_df %>%
+    mutate(Source = recode(Source,spread_line = 'Vegas', predicted_spread_home = 'Predicted'))
+   
+  head(spread_df)
+```
+
+
+
+This is the first shiny application.  This app creates a bar chart comparing the 
+predicted away moneyline to the vegas away moneyline.  There is an object to filter the chart
+on a specific game.  
+```{r}
+#Away ML shiny app
+
+ui <- fluidPage(
+  
+  # Sidebar layout with a input and output definitions 
+  sidebarLayout(
+    
+    # Inputs
+    sidebarPanel(
+      
+      # Select variable for x-axis
+      selectInput(inputId = "game_id", 
+                  label = "Game",
+                  choices = c(as.character(unique(away_ML$game_id)), "all"),
+                  selected = "game_id", multiple = FALSE),
+      
+       
+      
+      
+      
+    
+      
+    ),  
+    
+    # Outputs
+  mainPanel(
+      plotOutput('bar'),
+      br(), hr(), br(),
+      
+    )
+  )
+)
+  
+
+
+# Define server function required to create the bar chart
+server <- function(input, output) {
+  
+  observe(print(input$game_id))
+  
+  # Reactive data
+  # depends on input$game_id, so wrap in reactive()
+  dat <- reactive({
+    if (input$game_id != "all")
+    {
+    away_ML %>% filter(game_id %in% input$game_id)
+    } else {
+      away_ML
+    }
+  })
+  
+  # Create a bar chart object the plot Output function is expecting
+  output$bar <- renderPlot({
+
+    ggplot(data = dat(), aes(x = Source, y = Moneyline_Spread)) +
+      geom_bar(color = 'black', fill = 'purple', stat='identity') +
+      labs(title = paste("Bar Chart of", input$game_id)) +
+      geom_text(aes(label = Moneyline_Spread), vjust = -0.2)
+    
+  
+    
+    
+    
+    
+  })
+  
+  
+    
+  }
+
+
+# Create a Shiny app object
+shinyApp(ui = ui, server = server)
+```
+
+
+This is the second shiny application.  This app creates a bar chart comparing the 
+predicted home moneyline to the vegas home moneyline.  There is an object to filter the chart
+on a specific game.  
+```{r}
+#Home ML shiny app
+
+ui <- fluidPage(
+  
+  # Sidebar layout with a input and output definitions 
+  sidebarLayout(
+    
+    # Inputs
+    sidebarPanel(
+      
+      # Select variable for x-axis
+      selectInput(inputId = "game_id", 
+                  label = "Game",
+                  choices = c(as.character(unique(home_ML$game_id)), "all"),
+                  selected = "game_id", multiple = FALSE),
+      
+       
+      
+      
+      
+    
+      
+    ),  
+    
+    # Outputs
+  mainPanel(
+      plotOutput('bar'),
+      br(), hr(), br(),
+      
+    )
+  )
+)
+  
+
+
+# Define server function required to create the bar chart
+server <- function(input, output) {
+  
+  observe(print(input$game_id))
+  
+  # Reactive data
+  # depends on input$game_id, so wrap in reactive()
+  dat <- reactive({
+    if (input$game_id != "all")
+    {
+    home_ML %>% filter(game_id %in% input$game_id)
+    } else {
+      home_ML
+    }
+  })
+  
+  # Create a bar chart object the plo tOutput function is expecting
+  output$bar <- renderPlot({
+
+    ggplot(data = dat(), aes(x = Source, y = Moneyline_Spread)) +
+      geom_bar(color = 'black', fill = 'purple', stat='identity') +
+      labs(title = paste("Bar Chart of", input$game_id)) +
+      geom_text(aes(label = Moneyline_Spread), vjust = -0.2)
+    
+  
+    
+    
+    
+    
+  })
+  
+  
+    
+  }
+
+
+# Create a Shiny app object
+shinyApp(ui = ui, server = server)
+```
+
+
+This is the third shiny application.  This app creates a bar chart comparing the 
+predicted spread to the vegas spread.  There is an object to filter the chart
+on a specific game.  The predicted spread is for the home team.  The negative predicted
+spreads mean the home team is losing by that amount.  The negative vegas spreads would
+need to go a step further to align with the moneyline odds.  Comparing the vegas
+spread with the vegas moneylines will tell you which team was favored in the spread.  
+```{r}
+#Spread shiny app
+
+ui <- fluidPage(
+  
+  # Sidebar layout with a input and output definitions 
+  sidebarLayout(
+    
+    # Inputs
+    sidebarPanel(
+      
+      # Select variable for x-axis
+      selectInput(inputId = "game_id", 
+                  label = "Game",
+                  choices = c(as.character(unique(spread_df$game_id)), "all"),
+                  selected = "game_id", multiple = FALSE),
+      
+       
+      
+    
+    
+      
+    ),  
+    
+    # Outputs
+  mainPanel(
+      plotOutput('bar'),
+      br(), hr(), br(),
+      
+    )
+  )
+)
+  
+
+
+# Define server function required to create the bar chart
+server <- function(input, output) {
+  
+  observe(print(input$game_id))
+  
+  # Reactive data
+  # depends on input$game_id, so wrap in reactive()
+  dat <- reactive({
+    if (input$game_id != "all")
+    {
+    spread_df %>% filter(game_id %in% input$game_id)
+    } else {
+      spread_df
+    }
+  })
+  
+  # Create a bar chart object the plot Output function is expecting
+  output$bar <- renderPlot({
+
+    ggplot(data = dat(), aes(x = Source, y = Moneyline_Spread)) +
+      geom_bar(color = 'black', fill = 'purple', stat='identity') +
+      labs(title = paste("Bar Chart of", input$game_id)) +
+      geom_text(aes(label = Moneyline_Spread), vjust = -0.2)
+    
+  
+    
+    
+    
+    
+  })
+  
+  
+    
+  }
+
+
+# Create a Shiny app object
+shinyApp(ui = ui, server = server)
+```
+
